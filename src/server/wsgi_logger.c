@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------------- */
 
 /*
- * Copyright 2007-2015 GRAHAM DUMPLETON
+ * Copyright 2007-2016 GRAHAM DUMPLETON
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,15 @@
 #include "wsgi_logger.h"
 
 #include "wsgi_server.h"
+#include "wsgi_metrics.h"
+#include "wsgi_thread.h"
 
 /* ------------------------------------------------------------------------- */
 
 typedef struct {
         PyObject_HEAD
-        const char *target;
+        const char *name;
+        int proxy;
         request_rec *r;
         int level;
         char *s;
@@ -39,16 +42,37 @@ typedef struct {
 
 PyTypeObject Log_Type;
 
-PyObject *newLogObject(request_rec *r, int level, const char *target)
+PyObject *newLogBufferObject(request_rec *r, int level, const char *name,
+                             int proxy)
 {
     LogObject *self;
 
+    self = PyObject_New(LogObject, &Log_Type);
+    if (self == NULL)
+        return NULL;
+
+    self->name = name;
+    self->proxy = proxy;
+    self->r = r;
+    self->level = APLOG_NOERRNO|level;
+    self->s = NULL;
+    self->l = 0;
+    self->expired = 0;
+#if PY_MAJOR_VERSION < 3
+    self->softspace = 0;
+#endif
+
+    return (PyObject *)self;
+}
+
+PyObject *newLogWrapperObject(PyObject *buffer)
+{
 #if PY_MAJOR_VERSION >= 3
     PyObject *module = NULL;
     PyObject *dict = NULL;
     PyObject *object = NULL;
     PyObject *args = NULL;
-    PyObject *result = NULL;
+    PyObject *wrapper = NULL;
 
     module = PyImport_ImportModule("io");
 
@@ -63,35 +87,41 @@ PyObject *newLogObject(request_rec *r, int level, const char *target)
                         "name 'TextIOWrapper' is not defined");
         return NULL;
     }
-#endif
 
-    self = PyObject_New(LogObject, &Log_Type);
-    if (self == NULL)
-        return NULL;
-
-    self->target = target;
-    self->r = r;
-    self->level = APLOG_NOERRNO|level;
-    self->s = NULL;
-    self->l = 0;
-    self->expired = 0;
-#if PY_MAJOR_VERSION < 3
-    self->softspace = 0;
-#endif
-
-#if PY_MAJOR_VERSION >= 3
     Py_INCREF(object);
-    args = Py_BuildValue("(OssOO)", self, "utf-8", "replace",
-                         Py_None, Py_True);
-    Py_DECREF(self);
-    result = PyEval_CallObject(object, args);
+
+    args = Py_BuildValue("(OssOOO)", buffer, "utf-8", "replace",
+                         Py_None, Py_True, Py_True);
+
+    wrapper = PyEval_CallObject(object, args);
+
     Py_DECREF(args);
     Py_DECREF(object);
 
-    return result;
+    return (PyObject *)wrapper;
 #else
-    return (PyObject *)self;
+    Py_INCREF(buffer);
+
+    return (PyObject *)buffer;
 #endif
+}
+
+PyObject *newLogObject(request_rec *r, int level, const char *name,
+                       int proxy)
+{
+    PyObject *buffer = NULL;
+    PyObject *wrapper = NULL;
+
+    buffer = newLogBufferObject(r, level, name, proxy);
+
+    if (!buffer)
+        return NULL;
+
+    wrapper = newLogWrapperObject(buffer);
+
+    Py_DECREF(buffer);
+
+    return wrapper;
 }
 
 #if 0
@@ -100,7 +130,7 @@ static void Log_file(LogObject *self, const char *s, int l)
     /*
      * XXX This function is not currently being used.
      * The intention was that it be called instead of
-     * Log_call() when 'target' is non zero. This would
+     * Log_call() when 'name' is non zero. This would
      * be the case for 'stdout' and 'stderr'. Doing
      * this bypasses normally Apache logging mechanisms
      * though. May reawaken this code in mod_wsgi 4.0
@@ -127,13 +157,13 @@ static void Log_file(LogObject *self, const char *s, int l)
     errstr[1 + APR_CTIME_LEN    ] = ' ';
     plen = 1 + APR_CTIME_LEN + 1;
 
-    if (self->target) {
+    if (self->name) {
         int len;
 
         errstr[plen++] = '[';
 
-        len = strlen(self->target);
-        memcpy(errstr+plen, self->target, len);
+        len = strlen(self->name);
+        memcpy(errstr+plen, self->name, len);
 
         plen += len;
 
@@ -219,6 +249,14 @@ static void Log_dealloc(LogObject *self)
 
 static PyObject *Log_flush(LogObject *self, PyObject *args)
 {
+    WSGIThreadInfo *thread_info = NULL;
+
+    if (self->proxy)
+        thread_info = wsgi_thread_info(0, 0);
+
+    if (thread_info && thread_info->log_buffer)
+        return Log_flush((LogObject *)thread_info->log_buffer, args);
+
     if (self->expired) {
         PyErr_SetString(PyExc_RuntimeError, "log object has expired");
         return NULL;
@@ -239,6 +277,14 @@ static PyObject *Log_flush(LogObject *self, PyObject *args)
 static PyObject *Log_close(LogObject *self, PyObject *args)
 {
     PyObject *result = NULL;
+
+    WSGIThreadInfo *thread_info = NULL;
+
+    if (self->proxy)
+        thread_info = wsgi_thread_info(0, 0);
+
+    if (thread_info && thread_info->log_buffer)
+        return Log_close((LogObject *)thread_info->log_buffer, args);
 
     if (!self->expired)
         result = Log_flush(self, args);
@@ -367,6 +413,14 @@ static PyObject *Log_write(LogObject *self, PyObject *args)
     const char *msg = NULL;
     int len = -1;
 
+    WSGIThreadInfo *thread_info = NULL;
+
+    if (self->proxy)
+        thread_info = wsgi_thread_info(0, 0);
+
+    if (thread_info && thread_info->log_buffer)
+        return Log_write((LogObject *)thread_info->log_buffer, args);
+
     if (self->expired) {
         PyErr_SetString(PyExc_RuntimeError, "log object has expired");
         return NULL;
@@ -386,6 +440,14 @@ static PyObject *Log_writelines(LogObject *self, PyObject *args)
     PyObject *sequence = NULL;
     PyObject *iterator = NULL;
     PyObject *item = NULL;
+
+    WSGIThreadInfo *thread_info = NULL;
+
+    if (self->proxy)
+        thread_info = wsgi_thread_info(0, 0);
+
+    if (thread_info && thread_info->log_buffer)
+        return Log_writelines((LogObject *)thread_info->log_buffer, args);
 
     if (self->expired) {
         PyErr_SetString(PyExc_RuntimeError, "log object has expired");
@@ -449,6 +511,14 @@ static PyObject *Log_writable(LogObject *self, PyObject *args)
     Py_INCREF(Py_True);
     return Py_True;
 }
+
+static PyObject *Log_fileno(LogObject *self, PyObject *args)
+{
+    PyErr_SetString(PyExc_IOError, "Apache/mod_wsgi log object is not "
+            "associated with a file descriptor.");
+
+    return NULL;
+}
 #endif
 
 static PyObject *Log_closed(LogObject *self, void *closure)
@@ -460,12 +530,28 @@ static PyObject *Log_closed(LogObject *self, void *closure)
 #if PY_MAJOR_VERSION < 3
 static PyObject *Log_get_softspace(LogObject *self, void *closure)
 {
+    WSGIThreadInfo *thread_info = NULL;
+
+    if (self->proxy)
+        thread_info = wsgi_thread_info(0, 0);
+
+    if (thread_info && thread_info->log_buffer)
+        return Log_get_softspace((LogObject *)thread_info->log_buffer, closure);
+
     return PyInt_FromLong(self->softspace);
 }
 
 static int Log_set_softspace(LogObject *self, PyObject *value)
 {
     long new;
+
+    WSGIThreadInfo *thread_info = NULL;
+
+    if (self->proxy)
+        thread_info = wsgi_thread_info(0, 0);
+
+    if (thread_info && thread_info->log_buffer)
+        return Log_set_softspace((LogObject *)thread_info->log_buffer, value);
 
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError, "can't delete softspace attribute");
@@ -504,6 +590,7 @@ static PyMethodDef Log_methods[] = {
     { "readable",   (PyCFunction)Log_readable,   METH_NOARGS, 0 },
     { "seekable",   (PyCFunction)Log_seekable,   METH_NOARGS, 0 },
     { "writable",   (PyCFunction)Log_writable,   METH_NOARGS, 0 },
+    { "fileno",     (PyCFunction)Log_fileno,   METH_NOARGS, 0 },
 #endif
     { NULL, NULL}
 };
@@ -563,7 +650,8 @@ PyTypeObject Log_Type = {
     0,                      /*tp_is_gc*/
 };
 
-void wsgi_log_python_error(request_rec *r, PyObject *log, const char *filename)
+void wsgi_log_python_error(request_rec *r, PyObject *log,
+                           const char *filename, int publish)
 {
     PyObject *m = NULL;
     PyObject *result = NULL;
@@ -580,7 +668,7 @@ void wsgi_log_python_error(request_rec *r, PyObject *log, const char *filename)
     if (!log) {
         PyErr_Fetch(&type, &value, &traceback);
 
-        xlog = newLogObject(r, APLOG_ERR, NULL);
+        xlog = newLogObject(r, APLOG_ERR, NULL, 0);
 
         log = xlog;
 
@@ -672,9 +760,26 @@ void wsgi_log_python_error(request_rec *r, PyObject *log, const char *filename)
         }
     }
     else {
-        Py_XDECREF(type);
-        Py_XDECREF(value);
-        Py_XDECREF(traceback);
+        if (publish) {
+            PyObject *event = NULL;
+            PyObject *object = NULL;
+
+            if (wsgi_event_subscribers()) {
+                event = PyDict_New();
+
+                object = Py_BuildValue("(OOO)", type, value, traceback);
+                PyDict_SetItemString(event, "exception_info", object);
+                Py_DECREF(object);
+
+                wsgi_publish_event("request_exception", event);
+
+                Py_DECREF(event);
+            }
+        }
+
+        Py_DECREF(type);
+        Py_DECREF(value);
+        Py_DECREF(traceback);
     }
 
     Py_XDECREF(result);

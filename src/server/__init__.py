@@ -50,13 +50,24 @@ def where():
     return MOD_WSGI_SO
 
 def default_run_user():
-    return pwd.getpwuid(os.getuid()).pw_name
+    try:
+        uid = os.getuid()
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return '#%d' % uid
 
 def default_run_group():
     try:
-        return grp.getgrgid(pwd.getpwuid(os.getuid()).pw_gid).gr_name
+        uid = os.getuid()
+        entry = pwd.getpwuid(uid)
     except KeyError:
-        return '#%d' % pwd.getpwuid(os.getuid()).pw_gid
+        return '#%d' % uid
+
+    try:
+        gid = entry.pw_gid
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return '#%d' % gid
 
 def find_program(names, default=None, paths=[]):
     for name in names:
@@ -137,6 +148,10 @@ LoadModule mpm_prefork_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_mpm_prefork.so'
 </IfModule>
 </IfVersion>
 
+<IfDefine MOD_WSGI_WITH_HTTP2>
+LoadModule http2_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_http2.so'
+</IfDefine>
+
 <IfVersion >= 2.4>
 <IfModule !access_compat_module>
 LoadModule access_compat_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_access_compat.so'
@@ -172,6 +187,9 @@ LoadModule env_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_env.so'
 </IfModule>
 <IfModule !headers_module>
 LoadModule headers_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_headers.so'
+</IfModule>
+<IfModule !filter_module>
+LoadModule filter_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_filter.so'
 </IfModule>
 
 <IfDefine MOD_WSGI_DIRECTORY_LISTING>
@@ -230,6 +248,18 @@ LoadModule status_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_status.so'
 </IfModule>
 </IfDefine>
 
+<IfDefine MOD_WSGI_CGID_SCRIPT>
+<IfModule !cgid_module>
+LoadModule cgid_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_cgid.so'
+</IfModule>
+</IfDefine>
+
+<IfDefine MOD_WSGI_CGI_SCRIPT>
+<IfModule !cgi_module>
+LoadModule cgi_module '${MOD_WSGI_MODULES_DIRECTORY}/mod_cgi.so'
+</IfModule>
+</IfDefine>
+
 <IfVersion < 2.4>
 DefaultType text/plain
 </IfVersion>
@@ -241,6 +271,9 @@ MaxMemFree 64
 Timeout %(socket_timeout)s
 ListenBacklog %(server_backlog)s
 
+<IfDefine MOD_WSGI_WITH_HTTP2>
+Protocols h2 h2c http/1.1
+</IfDefine>
 
 <IfVersion >= 2.2.15>
 RequestReadTimeout %(request_read_timeout)s
@@ -250,11 +283,18 @@ LimitRequestBody %(limit_request_body)s
 
 <Directory />
     AllowOverride None
+<IfVersion < 2.4>
     Order deny,allow
     Deny from all
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all denied
+</IfVersion>
 </Directory>
 
 WSGIPythonHome '%(python_home)s'
+
+WSGIVerboseDebugging '%(verbose_debugging_flag)s'
 
 <IfDefine !ONE_PROCESS>
 WSGIRestrictEmbedded On
@@ -276,6 +316,7 @@ WSGIDaemonProcess %(host)s:%(port)s \\
    connect-timeout=%(connect_timeout)s \\
    request-timeout=%(request_timeout)s \\
    inactivity-timeout=%(inactivity_timeout)s \\
+   startup-timeout=%(startup_timeout)s \\
    deadlock-timeout=%(deadlock_timeout)s \\
    graceful-timeout=%(graceful_timeout)s \\
    eviction-timeout=%(eviction_timeout)s \\
@@ -284,7 +325,7 @@ WSGIDaemonProcess %(host)s:%(port)s \\
    receive-buffer-size=%(receive_buffer_size)s \\
    header-buffer-size=%(header_buffer_size)s \\
    response-buffer-size=%(response_buffer_size)s \\
-   server-metrics=%(daemon_server_metrics_flag)s
+   server-metrics=%(server_metrics_flag)s
 </IfDefine>
 <IfDefine !MOD_WSGI_MULTIPROCESS>
 WSGIDaemonProcess %(host)s:%(port)s \\
@@ -302,6 +343,7 @@ WSGIDaemonProcess %(host)s:%(port)s \\
    connect-timeout=%(connect_timeout)s \\
    request-timeout=%(request_timeout)s \\
    inactivity-timeout=%(inactivity_timeout)s \\
+   startup-timeout=%(startup_timeout)s \\
    deadlock-timeout=%(deadlock_timeout)s \\
    graceful-timeout=%(graceful_timeout)s \\
    eviction-timeout=%(eviction_timeout)s \\
@@ -309,7 +351,7 @@ WSGIDaemonProcess %(host)s:%(port)s \\
    send-buffer-size=%(send_buffer_size)s \\
    receive-buffer-size=%(receive_buffer_size)s \\
    response-buffer-size=%(response_buffer_size)s \\
-   server-metrics=%(daemon_server_metrics_flag)s
+   server-metrics=%(server_metrics_flag)s
 </IfDefine>
 </IfDefine>
 
@@ -319,18 +361,29 @@ WSGIMapHEADToGET %(map_head_to_get)s
 
 <IfDefine ONE_PROCESS>
 WSGIRestrictStdin Off
+<IfDefine MOD_WSGI_WITH_PYTHON_PATH>
+WSGIPythonPath '%(python_path)s'
+</IfDefine>
 </IfDefine>
 
 <IfDefine MOD_WSGI_SERVER_METRICS>
 ExtendedStatus On
 </IfDefine>
 
+WSGIServerMetrics %(server_metrics_flag)s
+
 <IfDefine MOD_WSGI_SERVER_STATUS>
 <Location /server-status>
     SetHandler server-status
+<IfVersion < 2.4>
     Order deny,allow
     Deny from all
     Allow from localhost
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all denied
+    Require host localhost
+</IfVersion>
 </Location>
 </IfDefine>
 
@@ -360,6 +413,10 @@ ErrorLog "|%(rotatelogs_executable)s \\
 ErrorLog "%(error_log_file)s"
 </IfDefine>
 LogLevel %(log_level)s
+
+<IfDefine MOD_WSGI_ERROR_LOG_FORMAT>
+ErrorLogFormat "%(error_log_format)s"
+</IfDefine>
 
 <IfDefine MOD_WSGI_ACCESS_LOG>
 <IfModule !log_config_module>
@@ -473,8 +530,13 @@ NameVirtualHost *:%(port)s
 </IfVersion>
 <VirtualHost _default_:%(port)s>
 <Location />
+<IfVersion < 2.4>
 Order deny,allow
 Deny from all
+</IfVersion>
+<IfVersion >= 2.4>
+Require all denied
+</IfVersion>
 <IfDefine MOD_WSGI_ALLOW_LOCALHOST>
 Allow from localhost
 </IfDefine>
@@ -531,8 +593,13 @@ NameVirtualHost *:%(https_port)s
 </IfVersion>
 <VirtualHost _default_:%(https_port)s>
 <Location />
+<IfVersion < 2.4>
 Order deny,allow
 Deny from all
+</IfVersion>
+<IfVersion >= 2.4>
+Require all denied
+</IfVersion>
 <IfDefine MOD_WSGI_ALLOW_LOCALHOST>
 Allow from localhost
 </IfDefine>
@@ -543,6 +610,9 @@ SSLCertificateKeyFile %(ssl_certificate_key_file)s
 <IfDefine MOD_WSGI_VERIFY_CLIENT>
 SSLCACertificateFile %(ssl_ca_certificate_file)s
 SSLVerifyClient none
+</IfDefine>
+<IfDefine MOD_WSGI_CERTIFICATE_CHAIN>
+SSLCertificateChainFile %(ssl_certificate_chain_file)s
 </IfDefine>
 </VirtualHost>
 <VirtualHost *:%(https_port)s>
@@ -556,6 +626,9 @@ SSLCertificateKeyFile %(ssl_certificate_key_file)s
 <IfDefine MOD_WSGI_VERIFY_CLIENT>
 SSLCACertificateFile %(ssl_ca_certificate_file)s
 SSLVerifyClient none
+</IfDefine>
+<IfDefine MOD_WSGI_CERTIFICATE_CHAIN>
+SSLCertificateChainFile %(ssl_certificate_chain_file)s
 </IfDefine>
 <IfDefine MOD_WSGI_HTTPS_ONLY>
 <IfDefine MOD_WSGI_HSTS_POLICY>
@@ -577,6 +650,9 @@ SSLCertificateKeyFile %(ssl_certificate_key_file)s
 SSLCACertificateFile %(ssl_ca_certificate_file)s
 SSLVerifyClient none
 </IfDefine>
+<IfDefine MOD_WSGI_CERTIFICATE_CHAIN>
+SSLCertificateChainFile %(ssl_certificate_chain_file)s
+</IfDefine>
 </VirtualHost>
 </IfDefine>
 </IfDefine>
@@ -587,8 +663,13 @@ DocumentRoot '%(document_root)s'
 
 <Directory '%(server_root)s'>
 <Files handler.wsgi>
+<IfVersion < 2.4>
     Order allow,deny
     Allow from all
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all granted
+</IfVersion>
 </Files>
 </Directory>
 
@@ -599,8 +680,15 @@ DocumentRoot '%(document_root)s'
 <IfDefine MOD_WSGI_DIRECTORY_LISTING>
     Options +Indexes
 </IfDefine>
-<IfDefine !MOD_WSGI_STATIC_ONLY>
+<IfDefine MOD_WSGI_CGI_SCRIPT>
+    Options +ExecCGI
+</IfDefine>
+<IfDefine MOD_WSGI_CGID_SCRIPT>
+    Options +ExecCGI
+</IfDefine>
     RewriteEngine On
+    Include %(rewrite_rules)s
+<IfDefine !MOD_WSGI_STATIC_ONLY>
     RewriteCond %%{REQUEST_FILENAME} !-f
 <IfDefine MOD_WSGI_DIRECTORY_INDEX>
     RewriteCond %%{REQUEST_FILENAME} !-d
@@ -610,8 +698,13 @@ DocumentRoot '%(document_root)s'
 </IfDefine>
     RewriteRule .* - [H=wsgi-handler]
 </IfDefine>
+<IfVersion < 2.4>
     Order allow,deny
     Allow from all
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all granted
+</IfVersion>
 </Directory>
 
 <IfDefine MOD_WSGI_ERROR_OVERRIDE>
@@ -668,11 +761,27 @@ WSGIImportScript '%(server_root)s/handler.wsgi' \\
 APACHE_PROXY_PASS_MOUNT_POINT_CONFIG = """
 ProxyPass '%(mount_point)s' '%(url)s'
 ProxyPassReverse '%(mount_point)s' '%(url)s'
+<Location '%(mount_point)s'>
+RewriteEngine On
+RewriteRule .* - [E=SERVER_PORT:%%{SERVER_PORT},NE]
+RequestHeader set X-Forwarded-Port %%{SERVER_PORT}e
+RewriteCond %%{HTTPS} on
+RewriteRule .* - [E=URL_SCHEME:https,NE]
+RequestHeader set X-Forwarded-Scheme %%{URL_SCHEME}e env=URL_SCHEME
+</Location>
 """
 
 APACHE_PROXY_PASS_MOUNT_POINT_SLASH_CONFIG = """
 ProxyPass '%(mount_point)s/' '%(url)s/'
 ProxyPassReverse '%(mount_point)s/' '%(url)s/'
+<Location '%(mount_point)s/'>
+RewriteEngine On
+RewriteRule .* - [E=SERVER_PORT:%%{SERVER_PORT},NE]
+RequestHeader set X-Forwarded-Port %%{SERVER_PORT}e
+RewriteCond %%{HTTPS} on
+RewriteRule .* - [E=URL_SCHEME:https,NE]
+RequestHeader set X-Forwarded-Scheme %%{URL_SCHEME}e env=URL_SCHEME
+</Location>
 <LocationMatch '^%(mount_point)s$'>
 RewriteEngine On
 RewriteRule - http://%%{HTTP_HOST}%%{REQUEST_URI}/ [R=302,L]
@@ -684,6 +793,11 @@ APACHE_PROXY_PASS_HOST_CONFIG = """
 ServerName %(host)s
 ProxyPass / '%(url)s'
 ProxyPassReverse / '%(url)s'
+RequestHeader set X-Forwarded-Port %(port)s
+RewriteEngine On
+RewriteCond %%{HTTPS} on
+RewriteRule .* - [E=URL_SCHEME:https,NE]
+RequestHeader set X-Forwarded-Scheme %%{URL_SCHEME}e env=URL_SCHEME
 </VirtualHost>
 """
 
@@ -691,8 +805,13 @@ APACHE_ALIAS_DIRECTORY_CONFIG = """
 Alias '%(mount_point)s' '%(directory)s'
 
 <Directory '%(directory)s'>
+<IfVersion < 2.4>
     Order allow,deny
     Allow from all
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all granted
+</IfVersion>
 </Directory>
 """
 
@@ -701,8 +820,13 @@ Alias '%(mount_point)s' '%(directory)s/%(filename)s'
 
 <Directory '%(directory)s'>
 <Files '%(filename)s'>
+<IfVersion < 2.4>
     Order allow,deny
     Allow from all
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all granted
+</IfVersion>
 </Files>
 </Directory>
 """
@@ -713,13 +837,23 @@ Alias /__wsgi__/images '%(images_directory)s'
 
 <Directory '%(documentation_directory)s'>
     DirectoryIndex index.html
+<IfVersion < 2.4>
     Order allow,deny
     Allow from all
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all granted
+</IfVersion>
 </Directory>
 
 <Directory '%(images_directory)s'>
+<IfVersion < 2.4>
     Order allow,deny
     Allow from all
+</IfVersion>
+<IfVersion >= 2.4>
+    Require all granted
+</IfVersion>
 </Directory>
 """
 
@@ -744,13 +878,13 @@ APACHE_PASSENV_CONFIG = """
 PassEnv '%(name)s'
 """
 
-APACHE_HANDLERS_CONFIG = """
+APACHE_HANDLER_SCRIPT_CONFIG = """
 WSGIHandlerScript wsgi-resource '%(server_root)s/resource.wsgi' \\
     process-group='%(host)s:%(port)s' application-group=%%{GLOBAL}
 """
 
-APACHE_EXTENSION_CONFIG = """
-AddHandler wsgi-resource %(extension)s
+APACHE_HANDLER_CONFIG = """
+AddHandler %(handler)s %(extension)s
 """
 
 APACHE_INCLUDE_CONFIG = """
@@ -776,7 +910,8 @@ WSGIDaemonProcess 'service:%(name)s' \\
     python-path='%(python_path)s' \\
     python-eggs='%(python_eggs)s' \\
     lang='%(lang)s' \\
-    locale='%(locale)s'
+    locale='%(locale)s' \\
+    server-metrics=%(server_metrics_flag)s
 WSGIImportScript '%(script)s' \\
     process-group='service:%(name)s' \\
     application-group=%%{GLOBAL}
@@ -800,7 +935,8 @@ WSGIDaemonProcess 'service:%(name)s' \\
     python-path='%(python_path)s' \\
     python-eggs='%(python_eggs)s' \\
     lang='%(lang)s' \\
-    locale='%(locale)s'
+    locale='%(locale)s' \\
+    server-metrics=%(server_metrics_flag)s
 WSGIImportScript '%(script)s' \\
     process-group='service:%(name)s' \\
     application-group=%%{GLOBAL}
@@ -829,18 +965,21 @@ def generate_apache_config(options):
         if options['url_aliases']:
             for mount_point, target in sorted(options['url_aliases'],
                     reverse=True):
-                target = os.path.abspath(target)
+                path = os.path.abspath(target)
 
-                if os.path.isdir(target):
-                    directory = target
+                if os.path.isdir(path):
+                    if target.endswith('/') and path != '/':
+                        directory = path + '/'
+                    else:
+                        directory = path
 
                     print(APACHE_ALIAS_DIRECTORY_CONFIG % dict(
                             mount_point=mount_point, directory=directory),
                             file=fp)
 
                 else:
-                    directory = os.path.dirname(target)
-                    filename = os.path.basename(target)
+                    directory = os.path.dirname(path)
+                    filename = os.path.basename(path)
 
                     print(APACHE_ALIAS_FILENAME_CONFIG % dict(
                             mount_point=mount_point, directory=directory,
@@ -871,11 +1010,15 @@ def generate_apache_config(options):
                 print(APACHE_PASSENV_CONFIG % dict(name=name), file=fp)
 
         if options['handler_scripts']:
-            print(APACHE_HANDLERS_CONFIG % options, file=fp)
+            print(APACHE_HANDLER_SCRIPT_CONFIG % options, file=fp)
 
             for extension, script in options['handler_scripts']:
-                print(APACHE_EXTENSION_CONFIG % dict(extension=extension),
-                        file=fp)
+                print(APACHE_HANDLER_CONFIG % dict(handler='wsgi-resource',
+                        extension=extension), file=fp)
+
+        if options['with_cgi']:
+            print(APACHE_HANDLER_CONFIG % dict(handler='cgi-script',
+                    extension='.cgi'), file=fp)
 
         if options['service_scripts']:
             service_log_files = {}
@@ -897,7 +1040,8 @@ def generate_apache_config(options):
                             python_path=options['python_path'],
                             working_directory=options['working_directory'],
                             python_eggs=options['python_eggs'],
-                            lang=options['lang'], locale=options['locale']),
+                            lang=options['lang'], locale=options['locale'],
+                            server_metrics_flag=options['server_metrics_flag']),
                             file=fp)
                 else:
                     print(APACHE_SERVICE_CONFIG % dict(name=name, user=user,
@@ -905,7 +1049,8 @@ def generate_apache_config(options):
                             python_path=options['python_path'],
                             working_directory=options['working_directory'],
                             python_eggs=options['python_eggs'],
-                            lang=options['lang'], locale=options['locale']),
+                            lang=options['lang'], locale=options['locale'],
+                            server_metrics_flag=options['server_metrics_flag']),
                             file=fp)
 
         if options['include_files']:
@@ -1060,7 +1205,7 @@ class PostMortemDebugger(object):
             for item in self.generator:
                 yield item
         except Exception:
-            self.debug_exception()
+            self.run_post_mortem()
             raise
 
     def close(self):
@@ -1068,7 +1213,7 @@ class PostMortemDebugger(object):
             if hasattr(self.generator, 'close'):
                 return self.generator.close()
         except Exception:
-            self.debug_exception()
+            self.run_post_mortem()
             raise
 
 class RequestRecorder(object):
@@ -1586,8 +1731,11 @@ MOD_WSGI_HTTPS_PORT="%(https_port)s"
 export MOD_WSGI_HTTP_PORT
 export MOD_WSGI_HTTPS_PORT
 
-MOD_WSGI_USER="${MOD_WSGI_USER:-%(user)s}"
-MOD_WSGI_GROUP="${MOD_WSGI_GROUP:-%(group)s}"
+WSGI_RUN_USER="${WSGI_RUN_USER:-%(user)s}"
+WSGI_RUN_GROUP="${WSGI_RUN_GROUP:-%(group)s}"
+
+MOD_WSGI_USER="${MOD_WSGI_USER:-${WSGI_RUN_USER}}"
+MOD_WSGI_GROUP="${MOD_WSGI_GROUP:-${WSGI_RUN_GROUP}}"
 
 export MOD_WSGI_USER
 export MOD_WSGI_GROUP
@@ -1698,6 +1846,18 @@ option_list = (
             'the directory containing the files to server or the current '
             'directory if none is supplied.'),
 
+    optparse.make_option('--entry-point', default=None,
+            metavar='FILE-PATH|MODULE', help='The file system path or '
+            'module name identifying the file which contains the WSGI '
+            'application entry point. How the value given is interpreted '
+            'depends on the corresponding type identified using the '
+            '\'--application-type\' option. Use of this option is the '
+            'same as if the value had been given as argument but without '
+            'any option specifier. A named option is also provided so '
+            'as to make it clearer in a long option list what the entry '
+            'point actually is. If both methods are used, that specified '
+            'by this option will take precedence.'),
+
     optparse.make_option('--host', default=None, metavar='IP-ADDRESS',
             help='The specific host (IP address) interface on which '
             'requests are to be accepted. Defaults to listening on '
@@ -1705,6 +1865,10 @@ option_list = (
     optparse.make_option('--port', default=8000, type='int',
             metavar='NUMBER', help='The specific port to bind to and '
             'on which requests are to be accepted. Defaults to port 8000.'),
+
+    optparse.make_option('--http2', action='store_true', default=False,
+            help='Flag indicating whether HTTP/2 should be enabled.'
+	    'Requires the mod_http2 module to be available.'),
 
     optparse.make_option('--https-port', type='int', metavar='NUMBER',
             help='The specific port to bind to and on which secure '
@@ -1743,6 +1907,11 @@ option_list = (
             'whole site will be disabled and verification will only be '
             'required for the specified sub URL.'),
 
+    optparse.make_option('--ssl-certificate-chain-file', default=None,
+            metavar='FILE-PATH', help='Specify the path to a file '
+            'containing the certificates of Certification Authorities (CA) '
+            'which form the certificate chain of the server certificate.'),
+
     optparse.make_option('--ssl-environment', action='store_true',
             default=False, help='Flag indicating whether the standard set '
             'of SSL related variables are passed in the per request '
@@ -1764,7 +1933,7 @@ option_list = (
             'parent domain name to the \'www.\' server name will created.'),
     optparse.make_option('--server-alias', action='append',
             dest='server_aliases', metavar='HOSTNAME', help='A secondary '
-            'host name for the web server. May include wilcard patterns.'),
+            'host name for the web server. May include wildcard patterns.'),
     optparse.make_option('--allow-localhost', action='store_true',
             default=False, help='Flag indicating whether access via '
             'localhost should still be allowed when a server name has been '
@@ -1814,6 +1983,14 @@ option_list = (
             'application reloaded. Defaults to 0, indicating that the '
             'worker process should never be restarted based on the number '
             'of requests received.'),
+
+    optparse.make_option('--startup-timeout', type='int', default=15,
+            metavar='SECONDS', help='Maximum number of seconds allowed '
+            'to pass waiting for the application to be successfully '
+            'loaded and started by a worker process. When this timeout '
+            'has been reached without the application having been '
+            'successfully loaded and started, the worker process will '
+            'be forced to restart. Defaults to 15 seconds.'),
 
     optparse.make_option('--shutdown-timeout', type='int', default=5,
             metavar='SECONDS', help='Maximum number of seconds allowed '
@@ -2076,6 +2253,11 @@ option_list = (
             'included at the end of the generated web server configuration '
             'file.'),
 
+    optparse.make_option('--rewrite-rules', metavar='FILE-PATH',
+            help='Specify an alternate server configuration file which '
+            'contains rewrite rules. Defaults to using the '
+            '\'rewrite.conf\' stored under the server root directory.'),
+
     optparse.make_option('--envvars-script', metavar='FILE-PATH',
             help='Specify an alternate script file for user defined web '
             'server environment variables. Defaults to using the '
@@ -2139,6 +2321,9 @@ option_list = (
             help='Flag indicating whether the web server startup log should '
             'be enabled. Defaults to being disabled.'),
 
+    optparse.make_option('--verbose-debugging', action='store_true',
+            dest='verbose_debugging', help=optparse.SUPPRESS_HELP),
+
     optparse.make_option('--log-to-terminal', action='store_true',
             default=False, help='Flag indicating whether logs should '
             'be directed back to the terminal. Defaults to being disabled. '
@@ -2148,6 +2333,8 @@ option_list = (
 
     optparse.make_option('--access-log-format', metavar='FORMAT',
             help='Specify the format of the access log records.'),
+    optparse.make_option('--error-log-format', metavar='FORMAT',
+            help='Specify the format of the error log records.'),
 
     optparse.make_option('--error-log-name', metavar='FILE-NAME',
             default='error_log', help='Specify the name of the error '
@@ -2229,7 +2416,13 @@ option_list = (
             'that should be used from New Relic agent configuration file.'),
 
     optparse.make_option('--with-php5', action='store_true', default=False,
-            help='Flag indicating whether PHP 5 support should be enabled.'),
+            help='Flag indicating whether PHP 5 support should be enabled. '
+            'PHP code files must use the \'.php\' extension.'),
+
+    optparse.make_option('--with-cgi', action='store_true', default=False,
+            help='Flag indicating whether CGI script support should be '
+            'enabled. CGI scripts must use the \'.cgi\' extension and be '
+            'executable'),
 
     optparse.make_option('--service-script', action='append', nargs=2,
             dest='service_scripts', metavar='SERVICE SCRIPT-PATH',
@@ -2390,6 +2583,13 @@ def _cmd_setup_server(command, args, options):
         options['ssl_ca_certificate_file'] = os.path.abspath(
                 options['ssl_ca_certificate_file'])
 
+    if options['ssl_certificate_chain_file']:
+        options['ssl_certificate_chain_file'] = os.path.abspath(
+                options['ssl_certificate_chain_file'])
+
+    if options['entry_point']:
+        args = [options['entry_point']]
+
     if not args:
         if options['application_type'] != 'static':
             options['entry_point'] = os.path.join(
@@ -2524,6 +2724,10 @@ def _cmd_setup_server(command, args, options):
     options['access_log_format'] = options['access_log_format'].replace(
             '\"', '\\"')
 
+    if options['error_log_format']:
+        options['error_log_format'] = options['error_log_format'].replace(
+                '\"', '\\"')
+
     options['pid_file'] = ((options['pid_file'] and os.path.abspath(
             options['pid_file'])) or os.path.join(options['server_root'],
             'httpd.pid'))
@@ -2571,9 +2775,9 @@ def _cmd_setup_server(command, args, options):
     options['request_read_timeout'] = request_read_timeout
 
     if options['server_metrics']:
-        options['daemon_server_metrics_flag'] = 'On'
+        options['server_metrics_flag'] = 'On'
     else:
-        options['daemon_server_metrics_flag'] = 'Off'
+        options['server_metrics_flag'] = 'Off'
 
     if options['handler_scripts']:
         handler_scripts = []
@@ -2697,6 +2901,10 @@ def _cmd_setup_server(command, args, options):
     options['process_name'] = options['process_name'].ljust(
             len(options['daemon_name']))
 
+    options['rewrite_rules'] = (os.path.abspath(
+            options['rewrite_rules']) if options['rewrite_rules'] is
+            not None else None)
+
     options['envvars_script'] = (os.path.abspath(
             options['envvars_script']) if options['envvars_script'] is
             not None else None)
@@ -2744,12 +2952,24 @@ def _cmd_setup_server(command, args, options):
                 with open('/dev/stderr', 'w'):
                     pass
             except IOError:
-                options['startup_log_file'] = None
+                try:
+                    with open('/dev/tty', 'w'):
+                        pass
+                except IOError:
+                    options['startup_log_file'] = None
+                else:
+                    options['startup_log_file'] = '/dev/tty'
             else:
                 options['startup_log_file'] = '/dev/stderr'
 
-        options['httpd_arguments_list'].append('-E')
-        options['httpd_arguments_list'].append(options['startup_log_file'])
+        if options['startup_log_file']:
+            options['httpd_arguments_list'].append('-E')
+            options['httpd_arguments_list'].append(options['startup_log_file'])
+
+    if options['verbose_debugging']:
+        options['verbose_debugging_flag'] = 'On'
+    else:
+        options['verbose_debugging_flag'] = 'Off'
 
     if options['server_name']:
         host = options['server_name']
@@ -2769,6 +2989,11 @@ def _cmd_setup_server(command, args, options):
         options['https_url'] = 'https://%s:%s/' % (host, options['https_port'])
     else:
         options['https_url'] = None
+
+    if any((options['enable_debugger'], options['enable_coverage'],
+            options['enable_profiler'], options['enable_recorder'],
+            options['enable_gdb'])):
+        options['debug_mode'] = True
 
     if options['debug_mode']:
         options['httpd_arguments_list'].append('-DONE_PROCESS')
@@ -2828,11 +3053,15 @@ def _cmd_setup_server(command, args, options):
             options['httpd_arguments_list'].append('-DMOD_WSGI_REDIRECT_WWW')
             options['parent_domain'] = options['server_name'][4:]
 
+    if options['http2']: 
+        options['httpd_arguments_list'].append('-DMOD_WSGI_WITH_HTTP2')
     if (options['https_port'] and options['ssl_certificate_file'] and
             options['ssl_certificate_key_file']):
         options['httpd_arguments_list'].append('-DMOD_WSGI_WITH_HTTPS')
     if options['ssl_ca_certificate_file']:
         options['httpd_arguments_list'].append('-DMOD_WSGI_VERIFY_CLIENT')
+    if options['ssl_certificate_chain_file']:
+        options['httpd_arguments_list'].append('-DMOD_WSGI_CERTIFICATE_CHAIN')
 
     if options['ssl_environment']:
         options['httpd_arguments_list'].append('-DMOD_WSGI_SSL_ENVIRONMENT')
@@ -2861,6 +3090,8 @@ def _cmd_setup_server(command, args, options):
         options['httpd_arguments_list'].append('-DMOD_WSGI_DIRECTORY_INDEX')
     if options['directory_listing']:
         options['httpd_arguments_list'].append('-DMOD_WSGI_DIRECTORY_LISTING')
+    if options['error_log_format']:
+        options['httpd_arguments_list'].append('-DMOD_WSGI_ERROR_LOG_FORMAT')
     if options['access_log']:
         options['httpd_arguments_list'].append('-DMOD_WSGI_ACCESS_LOG')
     if options['rotate_logs']:
@@ -2891,6 +3122,15 @@ def _cmd_setup_server(command, args, options):
         options['httpd_arguments_list'].append('-DMOD_WSGI_WITH_PROXY_HEADERS')
     if options['trusted_proxies']:
         options['httpd_arguments_list'].append('-DMOD_WSGI_WITH_TRUSTED_PROXIES')
+    if options['python_path']:
+        options['httpd_arguments_list'].append('-DMOD_WSGI_WITH_PYTHON_PATH')
+
+    if options['with_cgi']:
+        if os.path.exists(os.path.join(options['modules_directory'],
+                'mod_cgid.so')):
+            options['httpd_arguments_list'].append('-DMOD_WSGI_CGID_SCRIPT')
+        else:
+            options['httpd_arguments_list'].append('-DMOD_WSGI_CGI_SCRIPT')
 
     options['httpd_arguments_list'].extend(
             _mpm_module_defines(options['modules_directory'],
@@ -2908,9 +3148,6 @@ def _cmd_setup_server(command, args, options):
 
     if options['with_newrelic_platform']:
         generate_server_metrics_script(options)
-
-    generate_apache_config(options)
-    generate_control_scripts(options)
 
     print('Server URL         :', options['url'])
 
@@ -2942,10 +3179,15 @@ def _cmd_setup_server(command, args, options):
     if options['enable_recorder']:
         print('Recorder Output    :', options['recorder_directory'])
 
+    if options['rewrite_rules']:
+        print('Rewrite Rules      :', options['rewrite_rules'])
+
     if options['envvars_script']:
         print('Environ Variables  :', options['envvars_script'])
 
     if command == 'setup-server' or options['setup_only']:
+        if not options['rewrite_rules']:
+            print('Rewrite Rules      :', options['server_root'] + '/rewrite.conf')
         if not options['envvars_script']:
             print('Environ Variables  :', options['server_root'] + '/envvars')
         print('Control Script     :', options['server_root'] + '/apachectl')
@@ -2961,6 +3203,9 @@ def _cmd_setup_server(command, args, options):
 
     print('Request Timeout    : %s (seconds)' % options['request_timeout'])
 
+    if options['startup_timeout']:
+        print('Startup Timeout    : %s (seconds)' % options['startup_timeout'])
+
     print('Queue Backlog      : %s (connections)' % options['daemon_backlog'])
 
     print('Queue Timeout      : %s (seconds)' % options['queue_timeout'])
@@ -2971,6 +3216,18 @@ def _cmd_setup_server(command, args, options):
     print('Server Backlog     : %s (connections)' % options['server_backlog'])
 
     print('Locale Setting     :', options['locale'])
+
+    sys.stdout.flush()
+
+    if not options['rewrite_rules']:
+        options['rewrite_rules'] = options['server_root'] + '/rewrite.conf'
+
+        if not os.path.isfile(options['rewrite_rules']):
+            with open(options['rewrite_rules'], 'w') as fp:
+                pass
+
+    generate_apache_config(options)
+    generate_control_scripts(options)
 
     return options
 

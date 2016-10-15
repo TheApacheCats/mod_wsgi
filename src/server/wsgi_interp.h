@@ -4,7 +4,7 @@
 /* ------------------------------------------------------------------------- */
 
 /*
- * Copyright 2007-2015 GRAHAM DUMPLETON
+ * Copyright 2007-2016 GRAHAM DUMPLETON
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,11 +65,6 @@ extern int wsgi_python_required;
 
 extern const char *wsgi_python_path;
 extern const char *wsgi_python_eggs;
-
-#if APR_HAS_THREADS
-extern int wsgi_thread_count;
-extern apr_threadkey_t *wsgi_thread_key;
-#endif
 
 extern PyObject *wsgi_interpreters;
 

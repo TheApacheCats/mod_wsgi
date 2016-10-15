@@ -4,7 +4,7 @@
 /* ------------------------------------------------------------------------- */
 
 /*
- * Copyright 2007-2015 GRAHAM DUMPLETON
+ * Copyright 2007-2016 GRAHAM DUMPLETON
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,10 +28,16 @@
 
 extern PyTypeObject Log_Type;
 
-extern PyObject *newLogObject(request_rec *r, int level, const char *target);
+extern PyObject *newLogBufferObject(request_rec *r, int level,
+                                    const char *name, int proxy);
+
+extern PyObject *newLogWrapperObject(PyObject *buffer);
+
+extern PyObject *newLogObject(request_rec *r, int level, const char *name,
+                             int proxy);
 
 extern void wsgi_log_python_error(request_rec *r, PyObject *log,
-                                  const char *filename);
+                                  const char *filename, int publish);
 
 /* ------------------------------------------------------------------------- */
 

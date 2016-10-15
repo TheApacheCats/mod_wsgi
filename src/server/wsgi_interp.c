@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------------- */
 
 /*
- * Copyright 2007-2015 GRAHAM DUMPLETON
+ * Copyright 2007-2016 GRAHAM DUMPLETON
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,8 @@
 #include "wsgi_stream.h"
 #include "wsgi_metrics.h"
 #include "wsgi_daemon.h"
+#include "wsgi_metrics.h"
+#include "wsgi_thread.h"
 
 #if APR_HAVE_UNISTD_H
 #include <unistd.h>
@@ -96,7 +98,7 @@ static PyObject *SignalIntercept_call(
             PyObject *args = NULL;
             PyObject *result = NULL;
             Py_INCREF(o);
-            log = newLogObject(NULL, APLOG_WARNING, NULL);
+            log = newLogObject(NULL, APLOG_WARNING, NULL, 0);
             args = Py_BuildValue("(OOO)", Py_None, Py_None, log);
             result = PyEval_CallObject(o, args);
             Py_XDECREF(result);
@@ -161,11 +163,6 @@ PyTypeObject SignalIntercept_Type = {
 
 const char *wsgi_python_path = NULL;
 const char *wsgi_python_eggs = NULL;
-
-#if APR_HAS_THREADS
-int wsgi_thread_count = 0;
-apr_threadkey_t *wsgi_thread_key;
-#endif
 
 #if PY_MAJOR_VERSION > 3 || (PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 4)
 static void ShutdownInterpreter_dealloc(ShutdownInterpreterObject *self)
@@ -272,7 +269,7 @@ static PyObject *ShutdownInterpreter_call(
                         PyObject *log = NULL;
                         PyObject *args = NULL;
                         Py_INCREF(o);
-                        log = newLogObject(NULL, APLOG_ERR, NULL);
+                        log = newLogObject(NULL, APLOG_ERR, NULL, 0);
                         args = Py_BuildValue("(OOOOO)", type, value,
                                              traceback, Py_None, log);
                         result = PyEval_CallObject(o, args);
@@ -519,7 +516,7 @@ InterpreterObject *newInterpreterObject(const char *name)
      * the 'pdb' module.
      */
 
-    object = newLogObject(NULL, APLOG_ERR, "stderr");
+    object = newLogObject(NULL, APLOG_ERR, "stderr", 1);
     PySys_SetObject("stderr", object);
     Py_DECREF(object);
 
@@ -532,7 +529,7 @@ InterpreterObject *newInterpreterObject(const char *name)
             Py_DECREF(object);
         }
         else {
-            object = newLogObject(NULL, APLOG_ERR, "stdout");
+            object = newLogObject(NULL, APLOG_ERR, "stdout", 1);
             PySys_SetObject("stdout", object);
             Py_DECREF(object);
         }
@@ -631,7 +628,7 @@ InterpreterObject *newInterpreterObject(const char *name)
 
                 pwent = getpwuid(geteuid());
 
-                if (getenv("USER")) {
+                if (pwent && getenv("USER")) {
 #if PY_MAJOR_VERSION >= 3
                     key = PyUnicode_FromString("USER");
                     value = PyUnicode_Decode(pwent->pw_name,
@@ -649,7 +646,7 @@ InterpreterObject *newInterpreterObject(const char *name)
                     Py_DECREF(value);
                 }
 
-                if (getenv("USERNAME")) {
+                if (pwent && getenv("USERNAME")) {
 #if PY_MAJOR_VERSION >= 3
                     key = PyUnicode_FromString("USERNAME");
                     value = PyUnicode_Decode(pwent->pw_name,
@@ -667,7 +664,7 @@ InterpreterObject *newInterpreterObject(const char *name)
                     Py_DECREF(value);
                 }
 
-                if (getenv("LOGNAME")) {
+                if (pwent && getenv("LOGNAME")) {
 #if PY_MAJOR_VERSION >= 3
                     key = PyUnicode_FromString("LOGNAME");
                     value = PyUnicode_Decode(pwent->pw_name,
@@ -718,20 +715,24 @@ InterpreterObject *newInterpreterObject(const char *name)
                 struct passwd *pwent;
 
                 pwent = getpwuid(geteuid());
+
+                if (pwent) {
 #if PY_MAJOR_VERSION >= 3
-                key = PyUnicode_FromString("HOME");
-                value = PyUnicode_Decode(pwent->pw_dir, strlen(pwent->pw_dir),
-                                         Py_FileSystemDefaultEncoding,
-                                         "surrogateescape");
+                    key = PyUnicode_FromString("HOME");
+                    value = PyUnicode_Decode(pwent->pw_dir,
+                                             strlen(pwent->pw_dir),
+                                             Py_FileSystemDefaultEncoding,
+                                             "surrogateescape");
 #else
-                key = PyString_FromString("HOME");
-                value = PyString_FromString(pwent->pw_dir);
+                    key = PyString_FromString("HOME");
+                    value = PyString_FromString(pwent->pw_dir);
 #endif
 
-                PyObject_SetItem(object, key, value);
+                    PyObject_SetItem(object, key, value);
 
-                Py_DECREF(key);
-                Py_DECREF(value);
+                    Py_DECREF(key);
+                    Py_DECREF(value);
+                }
             }
 
             Py_DECREF(module);
@@ -843,15 +844,13 @@ InterpreterObject *newInterpreterObject(const char *name)
 
                 if (end) {
 #if PY_MAJOR_VERSION >= 3
-                    item = PyUnicode_Decode(start, end-start,
-                                            Py_FileSystemDefaultEncoding,
-                                            "surrogateescape");
+                    item = PyUnicode_DecodeFSDefaultAndSize(start, end-start);
+                    value = PyUnicode_AsUTF8(item);
 #else
                     item = PyString_FromStringAndSize(start, end-start);
+                    value = PyString_AsString(item);
 #endif
                     start = end+1;
-
-                    value = PyString_AsString(item);
 
                     Py_BEGIN_ALLOW_THREADS
                     ap_log_error(APLOG_MARK, APLOG_INFO, 0, wsgi_server,
@@ -879,15 +878,14 @@ InterpreterObject *newInterpreterObject(const char *name)
 
                     while (result && end) {
 #if PY_MAJOR_VERSION >= 3
-                        item = PyUnicode_Decode(start, end-start,
-                                                Py_FileSystemDefaultEncoding,
-                                                "surrogateescape");
+                        item = PyUnicode_DecodeFSDefaultAndSize(start,
+                                end-start);
+                        value = PyUnicode_AsUTF8(item);
 #else
                         item = PyString_FromStringAndSize(start, end-start);
+                        value = PyString_AsString(item);
 #endif
                         start = end+1;
-
-                        value = PyString_AsString(item);
 
                         Py_BEGIN_ALLOW_THREADS
                         ap_log_error(APLOG_MARK, APLOG_INFO, 0, wsgi_server,
@@ -916,13 +914,21 @@ InterpreterObject *newInterpreterObject(const char *name)
                     }
                 }
 
+#if PY_MAJOR_VERSION >= 3
+                item = PyUnicode_DecodeFSDefault(start);
+                value = PyUnicode_AsUTF8(item);
+#else
+                item = PyString_FromString(start);
+                value = PyString_AsString(item);
+#endif
+
                 Py_BEGIN_ALLOW_THREADS
                 ap_log_error(APLOG_MARK, APLOG_INFO, 0, wsgi_server,
                              "mod_wsgi (pid=%d): Adding '%s' to "
-                             "path.", getpid(), start);
+                             "path.", getpid(), value);
                 Py_END_ALLOW_THREADS
 
-                args = Py_BuildValue("(s)", start);
+                args = Py_BuildValue("(O)", item);
                 result = PyEval_CallObject(object, args);
 
                 if (!result) {
@@ -935,6 +941,7 @@ InterpreterObject *newInterpreterObject(const char *name)
                 }
 
                 Py_XDECREF(result);
+                Py_XDECREF(item);
                 Py_DECREF(args);
 
                 Py_DECREF(object);
@@ -1155,6 +1162,14 @@ InterpreterObject *newInterpreterObject(const char *name)
 
     PyModule_AddObject(module, "process_metrics", PyCFunction_New(
                        &wsgi_process_metrics_method[0], NULL));
+
+    PyModule_AddObject(module, "subscribe_events", PyCFunction_New(
+                       &wsgi_process_events_method[0], NULL));
+
+    PyModule_AddObject(module, "event_callbacks", PyList_New(0));
+
+    PyModule_AddObject(module, "request_data", PyCFunction_New(
+                       &wsgi_request_data_method[0], NULL));
 
     /* Done with the 'mod_wsgi' module. */
 
@@ -1389,32 +1404,21 @@ InterpreterObject *newInterpreterObject(const char *name)
 
     if (self->owner) {
 #if APR_HAS_THREADS
-        int thread_id = 0;
-        int *thread_handle = NULL;
+        WSGIThreadInfo *thread_handle = NULL;
 
         self->tstate_table = apr_hash_make(wsgi_server->process->pool);
 
-        apr_threadkey_private_get((void**)&thread_handle, wsgi_thread_key);
-
-        if (!thread_handle) {
-            thread_id = wsgi_thread_count++;
-            thread_handle = (int*)apr_pmemdup(wsgi_server->process->pool,
-                                              &thread_id, sizeof(thread_id));
-            apr_threadkey_private_set(thread_handle, wsgi_thread_key);
-        }
-        else {
-            thread_id = *thread_handle;
-        }
+        thread_handle = wsgi_thread_info(1, 0);
 
         if (wsgi_server_config->verbose_debugging) {
             ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, wsgi_server,
                          "mod_wsgi (pid=%d): Bind thread state for "
                          "thread %d against interpreter '%s'.", getpid(),
-                         thread_id, self->name);
+                         thread_handle->thread_id, self->name);
         }
 
-        apr_hash_set(self->tstate_table, thread_handle,
-                     sizeof(*thread_handle), tstate);
+        apr_hash_set(self->tstate_table, &thread_handle->thread_id,
+                     sizeof(thread_handle->thread_id), tstate);
 
         PyThreadState_Swap(save_tstate);
 #else
@@ -1437,6 +1441,8 @@ static void Interpreter_dealloc(InterpreterObject *self)
     PyObject *exitfunc = NULL;
 #endif
 
+    PyObject *event = NULL;
+
     /*
      * We should always enter here with the Python GIL
      * held and an active thread state. This should only
@@ -1454,23 +1460,12 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
     if (*self->name) {
 #if APR_HAS_THREADS
-        int thread_id = 0;
-        int *thread_handle = NULL;
+        WSGIThreadInfo *thread_handle = NULL;
 
-        apr_threadkey_private_get((void**)&thread_handle, wsgi_thread_key);
+        thread_handle = wsgi_thread_info(1, 0);
 
-        if (!thread_handle) {
-            thread_id = wsgi_thread_count++;
-            thread_handle = (int*)apr_pmemdup(wsgi_server->process->pool,
-                                              &thread_id, sizeof(thread_id));
-            apr_threadkey_private_set(thread_handle, wsgi_thread_key);
-        }
-        else {
-            thread_id = *thread_handle;
-        }
-
-        tstate = apr_hash_get(self->tstate_table, &thread_id,
-                              sizeof(thread_id));
+        tstate = apr_hash_get(self->tstate_table, &thread_handle->thread_id,
+                              sizeof(thread_handle->thread_id));
 
         if (!tstate) {
             tstate = PyThreadState_New(self->interp);
@@ -1479,11 +1474,11 @@ static void Interpreter_dealloc(InterpreterObject *self)
                 ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, wsgi_server,
                              "mod_wsgi (pid=%d): Create thread state for "
                              "thread %d against interpreter '%s'.", getpid(),
-                             thread_id, self->name);
+                             thread_handle->thread_id, self->name);
             }
 
-            apr_hash_set(self->tstate_table, thread_handle,
-                         sizeof(*thread_handle), tstate);
+            apr_hash_set(self->tstate_table, &thread_handle->thread_id,
+                         sizeof(thread_handle->thread_id), tstate);
         }
 #else
         tstate = self->tstate;
@@ -1496,6 +1491,8 @@ static void Interpreter_dealloc(InterpreterObject *self)
 
         PyThreadState_Swap(tstate);
     }
+
+    /* Now destroy the sub interpreter. */
 
     if (self->owner) {
         Py_BEGIN_ALLOW_THREADS
@@ -1511,6 +1508,14 @@ static void Interpreter_dealloc(InterpreterObject *self)
                      getpid(), self->name);
         Py_END_ALLOW_THREADS
     }
+
+    /* Publish event that process is being stopped. */
+
+    event = PyDict_New();
+
+    wsgi_publish_event("process_stopping", event);
+
+    Py_DECREF(event);
 
     /*
      * Because the thread state we are using was created outside
@@ -1609,7 +1614,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
                         PyObject *log = NULL;
                         PyObject *args = NULL;
                         Py_INCREF(o);
-                        log = newLogObject(NULL, APLOG_ERR, NULL);
+                        log = newLogObject(NULL, APLOG_ERR, NULL, 0);
                         args = Py_BuildValue("(OOOOO)", type, value,
                                              traceback, Py_None, log);
                         result = PyEval_CallObject(o, args);
@@ -1742,7 +1747,7 @@ static void Interpreter_dealloc(InterpreterObject *self)
                     PyObject *log = NULL;
                     PyObject *args = NULL;
                     Py_INCREF(o);
-                    log = newLogObject(NULL, APLOG_ERR, NULL);
+                    log = newLogObject(NULL, APLOG_ERR, NULL, 0);
                     args = Py_BuildValue("(OOOOO)", type, value,
                                          traceback, Py_None, log);
                     result = PyEval_CallObject(o, args);
@@ -2416,23 +2421,12 @@ InterpreterObject *wsgi_acquire_interpreter(const char *name)
 
     if (*name) {
 #if APR_HAS_THREADS
-        int thread_id = 0;
-        int *thread_handle = NULL;
+        WSGIThreadInfo *thread_handle = NULL;
 
-        apr_threadkey_private_get((void**)&thread_handle, wsgi_thread_key);
+        thread_handle = wsgi_thread_info(1, 0);
 
-        if (!thread_handle) {
-            thread_id = wsgi_thread_count++;
-            thread_handle = (int*)apr_pmemdup(wsgi_server->process->pool,
-                                              &thread_id, sizeof(thread_id));
-            apr_threadkey_private_set(thread_handle, wsgi_thread_key);
-        }
-        else {
-            thread_id = *thread_handle;
-        }
-
-        tstate = apr_hash_get(handle->tstate_table, &thread_id,
-                              sizeof(thread_id));
+        tstate = apr_hash_get(handle->tstate_table, &thread_handle->thread_id,
+                              sizeof(thread_handle->thread_id));
 
         if (!tstate) {
             tstate = PyThreadState_New(interp);
@@ -2441,11 +2435,11 @@ InterpreterObject *wsgi_acquire_interpreter(const char *name)
                 ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, wsgi_server,
                              "mod_wsgi (pid=%d): Create thread state for "
                              "thread %d against interpreter '%s'.", getpid(),
-                             thread_id, handle->name);
+                             thread_handle->thread_id, handle->name);
             }
 
-            apr_hash_set(handle->tstate_table, thread_handle,
-                         sizeof(*thread_handle), tstate);
+            apr_hash_set(handle->tstate_table, &thread_handle->thread_id,
+                         sizeof(thread_handle->thread_id), tstate);
         }
 #else
         tstate = handle->tstate;

@@ -4,7 +4,7 @@
 /* ------------------------------------------------------------------------- */
 
 /*
- * Copyright 2007-2015 GRAHAM DUMPLETON
+ * Copyright 2007-2016 GRAHAM DUMPLETON
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -109,6 +109,7 @@ typedef struct {
     int stack_size;
     int maximum_requests;
     int shutdown_timeout;
+    apr_time_t startup_timeout;
     apr_time_t deadlock_timeout;
     apr_time_t inactivity_timeout;
     apr_time_t request_timeout;
